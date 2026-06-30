@@ -1,23 +1,18 @@
-// let the editor know that `Chart` is defined by some code
-// included in another file (in this case, `index.html`)
-// Note: the code will still work without this line, but without it you
-// will see an error in the editor
 /* global THREE */
 /* global TransformStream */
 /* global TextEncoderStream */
 /* global TextDecoderStream */
 'use strict';
 
-import * as THREE from 'three'; // This brings in Three.js so we can generate a 3D view
-import {OBJLoader} from 'objloader'; // This lets us load the .obj 3D model file
+import * as THREE from 'three';
+import {OBJLoader} from 'objloader';
 
 // ===============================
 // SERIAL CONNECTION VARIABLES
 // ===============================
-// These variables store the USB serial connection between the browser and the IMU/microcontroller.
 
-let port; // Computer USB serial port
-let reader; // Keeps reading incoming data from the IMU
+let port;
+let reader;
 let inputDone;
 let outputDone;
 let inputStream;
@@ -27,27 +22,29 @@ let showCalibration = false;
 // ===============================
 // IMU DATA VARIABLES
 // ===============================
-// These store the latest IMU readings.
 
 let orientation = [0, 0, 0]; // [heading, roll, pitch]
 let quaternion = [1, 0, 0, 0]; // [w, x, y, z]
 let calibration = [0, 0, 0, 0]; // [system, gyro, accelerometer, magnetometer]
 
 // ===============================
-// CSV RECORDING VARIABLES
+// SYNCED CSV + VIDEO RECORDING VARIABLES
 // ===============================
 
-let recordedData = []; // Every new reading gets added here
+let recordedData = [];
 let latestOrientation = [0, 0, 0];
 let latestQuaternion = [1, 0, 0, 0];
 let latestCalibration = [0, 0, 0, 0];
-let recordingEnabled = true;
 
-// ===============================
-// VIDEO RECORDING VARIABLES
-// ===============================
-// These allow us to record the 3D head canvas as a video.
+// Important: CSV recording starts ONLY when synced recording starts.
+let recordingEnabled = false;
 
+// These make the CSV and video match.
+let recordingStartTimeMs = null;
+let recordingStopTimeMs = null;
+let recordingId = null;
+
+// Video recording variables.
 let mediaRecorder;
 let recordedVideoChunks = [];
 let videoRecording = false;
@@ -95,7 +92,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   angleType.addEventListener('change', changeAngleType);
   darkMode.addEventListener('click', clickDarkMode);
 
-  // Add CSV and video buttons automatically so you do NOT need to edit index.html.
   addRecordingButtons();
 
   if ('serial' in navigator) {
@@ -118,13 +114,25 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ===============================
 // BUTTON CREATION
 // ===============================
-// This creates the extra buttons directly from JavaScript.
 
 function addRecordingButtons() {
+  const startSyncedButton = document.createElement('button');
+  startSyncedButton.id = 'startSyncedRecording';
+  startSyncedButton.textContent = 'Start Synced Recording';
+  startSyncedButton.style.marginLeft = '10px';
+  startSyncedButton.addEventListener('click', startSyncedRecording);
+
+  const stopSyncedButton = document.createElement('button');
+  stopSyncedButton.id = 'stopSyncedRecording';
+  stopSyncedButton.textContent = 'Stop Synced Recording';
+  stopSyncedButton.style.marginLeft = '5px';
+  stopSyncedButton.disabled = true;
+  stopSyncedButton.addEventListener('click', stopSyncedRecording);
+
   const downloadButton = document.createElement('button');
   downloadButton.id = 'downloadCSV';
   downloadButton.textContent = 'Download CSV';
-  downloadButton.style.marginLeft = '10px';
+  downloadButton.style.marginLeft = '5px';
   downloadButton.addEventListener('click', downloadCSV);
 
   const clearRecordedButton = document.createElement('button');
@@ -133,23 +141,10 @@ function addRecordingButtons() {
   clearRecordedButton.style.marginLeft = '5px';
   clearRecordedButton.addEventListener('click', clearRecordedData);
 
-  const startVideoButton = document.createElement('button');
-  startVideoButton.id = 'startVideoRecording';
-  startVideoButton.textContent = 'Start Video';
-  startVideoButton.style.marginLeft = '5px';
-  startVideoButton.addEventListener('click', startVideoRecording);
-
-  const stopVideoButton = document.createElement('button');
-  stopVideoButton.id = 'stopVideoRecording';
-  stopVideoButton.textContent = 'Stop Video';
-  stopVideoButton.style.marginLeft = '5px';
-  stopVideoButton.disabled = true;
-  stopVideoButton.addEventListener('click', stopVideoRecording);
-
-  butConnect.insertAdjacentElement('afterend', downloadButton);
+  butConnect.insertAdjacentElement('afterend', startSyncedButton);
+  startSyncedButton.insertAdjacentElement('afterend', stopSyncedButton);
+  stopSyncedButton.insertAdjacentElement('afterend', downloadButton);
   downloadButton.insertAdjacentElement('afterend', clearRecordedButton);
-  clearRecordedButton.insertAdjacentElement('afterend', startVideoButton);
-  startVideoButton.insertAdjacentElement('afterend', stopVideoButton);
 }
 
 // ===============================
@@ -157,10 +152,7 @@ function addRecordingButtons() {
 // ===============================
 
 async function connect() {
-  // Ask user which serial device to connect.
   port = await navigator.serial.requestPort();
-
-  // Open the serial port using the selected baud rate.
   await port.open({ baudRate: Number(baudRate.value) });
 
   let decoder = new TextDecoderStream();
@@ -180,6 +172,10 @@ async function connect() {
 }
 
 async function disconnect() {
+  if (videoRecording) {
+    stopSyncedRecording();
+  }
+
   if (reader) {
     await reader.cancel();
     await inputDone.catch(() => {});
@@ -222,10 +218,6 @@ async function readLoop() {
 // ===============================
 // PARSE SERIAL DATA
 // ===============================
-// Expected lines:
-// Orientation: 357.19, 0.94, 1.62
-// Quaternion: 0.9996, -0.0146, -0.0079, -0.0249
-// Calibration: 0, 3, 3, 0
 
 function parseSerialLine(value) {
   value = value.trim();
@@ -239,7 +231,7 @@ function parseSerialLine(value) {
     quaternion = value.substr(11).trim().split(",").map(x => +x);
     latestQuaternion = quaternion;
 
-    // Save one CSV row every time a quaternion reading arrives.
+    // This records only during synced recording.
     recordCurrentReading();
   }
 
@@ -255,16 +247,138 @@ function parseSerialLine(value) {
 }
 
 // ===============================
+// SYNCED RECORDING
+// ===============================
+
+function startSyncedRecording() {
+  if (videoRecording) {
+    alert("A synced recording is already running.");
+    return;
+  }
+
+  if (!canvas.captureStream) {
+    alert("Your browser does not support canvas video recording. Try Chrome or Edge.");
+    return;
+  }
+
+  // Clear old trial data so the CSV and video belong to the same trial.
+  recordedData = [];
+  recordedVideoChunks = [];
+
+  recordingId = makeRecordingId();
+
+  const stream = canvas.captureStream(30);
+
+  try {
+    mediaRecorder = new MediaRecorder(stream, {
+      mimeType: 'video/webm'
+    });
+  } catch (error) {
+    console.error(error);
+    alert("Could not start video recording. Try Chrome or Edge.");
+    return;
+  }
+
+  mediaRecorder.ondataavailable = function(event) {
+    if (event.data && event.data.size > 0) {
+      recordedVideoChunks.push(event.data);
+    }
+  };
+
+  mediaRecorder.onstop = function() {
+    downloadVideo();
+  };
+
+  // This is the shared start time for BOTH the video and CSV.
+  recordingStartTimeMs = performance.now();
+  recordingStopTimeMs = null;
+
+  // Start video.
+  mediaRecorder.start();
+
+  // Start CSV recording.
+  recordingEnabled = true;
+  videoRecording = true;
+
+  setRecordingButtons(true);
+
+  console.log("Synced recording started:", recordingId);
+}
+
+function stopSyncedRecording() {
+  if (!videoRecording) {
+    alert("No synced recording is currently running.");
+    return;
+  }
+
+  // Stop CSV recording first so no extra rows are added after video stop.
+  recordingEnabled = false;
+  recordingStopTimeMs = performance.now();
+
+  // Stop video recording.
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+
+  videoRecording = false;
+  setRecordingButtons(false);
+
+  console.log("Synced recording stopped:", recordingId);
+}
+
+function setRecordingButtons(isRecording) {
+  const startButton = document.getElementById('startSyncedRecording');
+  const stopButton = document.getElementById('stopSyncedRecording');
+
+  if (startButton) {
+    startButton.disabled = isRecording;
+  }
+
+  if (stopButton) {
+    stopButton.disabled = !isRecording;
+  }
+}
+
+function makeRecordingId() {
+  const now = new Date();
+
+  return "trial_" +
+    now.getFullYear() + "-" +
+    String(now.getMonth() + 1).padStart(2, "0") + "-" +
+    String(now.getDate()).padStart(2, "0") + "_" +
+    String(now.getHours()).padStart(2, "0") + "-" +
+    String(now.getMinutes()).padStart(2, "0") + "-" +
+    String(now.getSeconds()).padStart(2, "0");
+}
+
+// ===============================
 // CSV RECORDING
 // ===============================
 
 function recordCurrentReading() {
-  if (!recordingEnabled) {
+  if (!recordingEnabled || recordingStartTimeMs === null) {
     return;
   }
 
+  const nowMs = performance.now();
+  const elapsedMs = nowMs - recordingStartTimeMs;
+  const videoTimeSec = elapsedMs / 1000.0;
+
+  // These are the exact quaternion values used by Three.js to rotate the head.
+  const threeQx = latestQuaternion[1];
+  const threeQy = latestQuaternion[3];
+  const threeQz = -latestQuaternion[2];
+  const threeQw = latestQuaternion[0];
+
   recordedData.push({
+    recordingId: recordingId,
+
+    // Browser wall-clock timestamp.
     timestamp: new Date().toISOString(),
+
+    // These two columns are what let you match CSV rows to the video.
+    elapsedMs: elapsedMs.toFixed(3),
+    videoTimeSec: videoTimeSec.toFixed(6),
 
     heading: latestOrientation[0],
     roll: latestOrientation[1],
@@ -275,6 +389,12 @@ function recordCurrentReading() {
     qy: latestQuaternion[2],
     qz: latestQuaternion[3],
 
+    // Exact quaternion applied to the 3D head in Three.js.
+    three_qx: threeQx,
+    three_qy: threeQy,
+    three_qz: threeQz,
+    three_qw: threeQw,
+
     systemCal: latestCalibration[0],
     gyroCal: latestCalibration[1],
     accelCal: latestCalibration[2],
@@ -284,19 +404,30 @@ function recordCurrentReading() {
 
 function downloadCSV() {
   if (recordedData.length === 0) {
-    alert("No data recorded yet. Connect your IMU and wait for readings first.");
+    alert("No synced data recorded yet. Click Start Synced Recording, move the IMU, then Stop Synced Recording.");
     return;
   }
 
   const headers = [
+    "recordingId",
     "timestamp",
+    "elapsedMs",
+    "videoTimeSec",
+
     "heading",
     "roll",
     "pitch",
+
     "qw",
     "qx",
     "qy",
     "qz",
+
+    "three_qx",
+    "three_qy",
+    "three_qz",
+    "three_qw",
+
     "systemCal",
     "gyroCal",
     "accelCal",
@@ -327,16 +458,7 @@ function downloadCSV() {
   const a = document.createElement("a");
   a.href = url;
 
-  const now = new Date();
-  const filename =
-    "imu_data_" +
-    now.getFullYear() + "-" +
-    String(now.getMonth() + 1).padStart(2, "0") + "-" +
-    String(now.getDate()).padStart(2, "0") + "_" +
-    String(now.getHours()).padStart(2, "0") + "-" +
-    String(now.getMinutes()).padStart(2, "0") + "-" +
-    String(now.getSeconds()).padStart(2, "0") +
-    ".csv";
+  const filename = recordingId ? recordingId + "_imu_data.csv" : "imu_data.csv";
 
   a.download = filename;
   document.body.appendChild(a);
@@ -347,113 +469,48 @@ function downloadCSV() {
 }
 
 function clearRecordedData() {
-  recordedData = [];
-  alert("Recorded IMU data cleared.");
-}
-
-// ===============================
-// VIDEO RECORDING
-// ===============================
-// This records the 3D canvas as a video.
-// The downloaded file will be .webm.
-
-function startVideoRecording() {
   if (videoRecording) {
-    alert("Video is already recording.");
+    alert("Stop the synced recording before clearing data.");
     return;
   }
 
-  if (!canvas.captureStream) {
-    alert("Your browser does not support canvas video recording. Try Chrome or Edge.");
-    return;
-  }
-
+  recordedData = [];
   recordedVideoChunks = [];
+  recordingStartTimeMs = null;
+  recordingStopTimeMs = null;
+  recordingId = null;
 
-  // 30 means 30 frames per second.
-  const stream = canvas.captureStream(30);
-
-  try {
-    mediaRecorder = new MediaRecorder(stream, {
-      mimeType: 'video/webm'
-    });
-  } catch (error) {
-    console.error(error);
-    alert("Could not start video recording. Try using Chrome or Edge.");
-    return;
-  }
-
-  mediaRecorder.ondataavailable = function(event) {
-    if (event.data && event.data.size > 0) {
-      recordedVideoChunks.push(event.data);
-    }
-  };
-
-  mediaRecorder.onstop = function() {
-    const blob = new Blob(recordedVideoChunks, {
-      type: 'video/webm'
-    });
-
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement('a');
-    a.href = url;
-
-    const now = new Date();
-    const filename =
-      "head_movement_" +
-      now.getFullYear() + "-" +
-      String(now.getMonth() + 1).padStart(2, "0") + "-" +
-      String(now.getDate()).padStart(2, "0") + "_" +
-      String(now.getHours()).padStart(2, "0") + "-" +
-      String(now.getMinutes()).padStart(2, "0") + "-" +
-      String(now.getSeconds()).padStart(2, "0") +
-      ".webm";
-
-    a.download = filename;
-
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-
-    URL.revokeObjectURL(url);
-
-    videoRecording = false;
-
-    const startButton = document.getElementById('startVideoRecording');
-    const stopButton = document.getElementById('stopVideoRecording');
-
-    if (startButton) {
-      startButton.disabled = false;
-    }
-
-    if (stopButton) {
-      stopButton.disabled = true;
-    }
-  };
-
-  mediaRecorder.start();
-  videoRecording = true;
-
-  const startButton = document.getElementById('startVideoRecording');
-  const stopButton = document.getElementById('stopVideoRecording');
-
-  if (startButton) {
-    startButton.disabled = true;
-  }
-
-  if (stopButton) {
-    stopButton.disabled = false;
-  }
+  alert("Recorded IMU data and video chunks cleared.");
 }
 
-function stopVideoRecording() {
-  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-    alert("No video is currently recording.");
+// ===============================
+// VIDEO DOWNLOAD
+// ===============================
+
+function downloadVideo() {
+  if (recordedVideoChunks.length === 0) {
+    alert("No video data was recorded.");
     return;
   }
 
-  mediaRecorder.stop();
+  const blob = new Blob(recordedVideoChunks, {
+    type: 'video/webm'
+  });
+
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+
+  const filename = recordingId ? recordingId + "_head_movement.webm" : "head_movement.webm";
+
+  a.download = filename;
+
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  URL.revokeObjectURL(url);
 }
 
 // ===============================
@@ -719,7 +776,6 @@ scene.background = new THREE.Color('black');
   objLoader.load('assets/head.obj', (root) => {
     head = root;
 
-    // Adjust this if the head appears too large or too small.
     head.scale.set(1, 1, 1);
 
     scene.add(root);
@@ -742,7 +798,6 @@ function resizeRendererToDisplaySize(renderer) {
 // ===============================
 // RENDER LOOP
 // ===============================
-// This keeps redrawing the 3D head and applying the latest IMU rotation.
 
 async function render() {
   if (resizeRendererToDisplaySize(renderer)) {
