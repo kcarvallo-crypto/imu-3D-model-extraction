@@ -750,6 +750,12 @@ let head;
 // This way, IMU rotation moves everything together.
 const headContainer = new THREE.Group();
 
+// Make the full head + canals fit better in the display window.
+// Smaller scale = less zoomed in.
+// Negative Y moves everything slightly down so the forehead is not cropped.
+headContainer.scale.set(0.65, 0.65, 0.65);
+headContainer.position.set(0, -2.5, 0);
+
 const renderer = new THREE.WebGLRenderer({
   canvas,
   preserveDrawingBuffer: true
@@ -759,10 +765,11 @@ const camera = new THREE.PerspectiveCamera(
   45,
   canvas.width / canvas.height,
   0.1,
-  100
+  200
 );
 
-camera.position.set(0, 0, 30);
+// Move camera farther back so the whole model fits.
+camera.position.set(0, 0, 50);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('black');
@@ -790,12 +797,13 @@ scene.add(headContainer);
 
 // Helper function to create custom 3D torus canals.
 function createCanalRing(color) {
-  const geometry = new THREE.TorusGeometry(2.2, 0.18, 8, 32);
+  // Smaller rings so they fit near the ears instead of floating away.
+  const geometry = new THREE.TorusGeometry(1.25, 0.11, 8, 32);
 
   const material = new THREE.MeshPhongMaterial({
     color: color,
     transparent: true,
-    opacity: 0.7,
+    opacity: 0.75,
     shininess: 80
   });
 
@@ -806,10 +814,13 @@ function createCanalRing(color) {
 const leftEarGroup = new THREE.Group();
 const rightEarGroup = new THREE.Group();
 
-// Offset groups laterally.
-// Adjust these if the canal rings are not located correctly on your head model.
-leftEarGroup.position.set(7, 7.5, 0);
-rightEarGroup.position.set(-7, 7.5, 0);
+// Move canal groups closer to the sides of the head.
+// x = left/right, y = up/down, z = front/back.
+leftEarGroup.position.set(4.8, 2.2, 4.0);
+rightEarGroup.position.set(-4.8, 2.2, 4.0);
+
+leftEarGroup.scale.set(0.8, 0.8, 0.8);
+rightEarGroup.scale.set(0.8, 0.8, 0.8);
 
 // ===============================
 // LEFT VESTIBULAR APPARATUS
