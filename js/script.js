@@ -1,3 +1,7 @@
+// let the editor know that `Chart` is defined by some code
+// included in another file (in this case, `index.html`)
+// Note: the code will still work without this line, but without it you
+// will see an error in the editor
 /* global THREE */
 /* global TransformStream */
 /* global TextEncoderStream */
@@ -7,10 +11,6 @@
 import * as THREE from 'three';
 import {OBJLoader} from 'objloader';
 
-// ===============================
-// SERIAL CONNECTION VARIABLES
-// ===============================
-
 let port;
 let reader;
 let inputDone;
@@ -19,42 +19,38 @@ let inputStream;
 let outputStream;
 let showCalibration = false;
 
-// ===============================
-// IMU DATA VARIABLES
-// ===============================
-
-let orientation = [0, 0, 0]; // [heading, roll, pitch]
-let quaternion = [1, 0, 0, 0]; // [w, x, y, z]
-let calibration = [0, 0, 0, 0]; // [system, gyro, accelerometer, magnetometer]
+let orientation = [0, 0, 0];
+let quaternion = [1, 0, 0, 0];
+let calibration = [0, 0, 0, 0];
 
 // ===============================
-// SYNCED CSV + VIDEO RECORDING VARIABLES
+// CSV RECORDING VARIABLES
 // ===============================
-
 let recordedData = [];
 let latestOrientation = [0, 0, 0];
 let latestQuaternion = [1, 0, 0, 0];
 let latestCalibration = [0, 0, 0, 0];
 
-// Important: CSV recording starts ONLY when synced recording starts.
+// CSV rows are saved only during a synced recording.
 let recordingEnabled = false;
 
-// These make the CSV and video match.
+// These variables make the CSV and video belong to the same exact trial.
 let recordingStartTimeMs = null;
 let recordingStopTimeMs = null;
 let recordingId = null;
 
-// Video recording variables.
+// ===============================
+// VIDEO RECORDING VARIABLES
+// ===============================
 let mediaRecorder;
 let recordedVideoChunks = [];
 let videoRecording = false;
 
-// ===============================
-// PAGE ELEMENTS
-// ===============================
-
 const maxLogLength = 100;
-const baudRates = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200, 230400, 250000, 500000, 1000000, 2000000];
+const baudRates = [
+  300, 1200, 2400, 4800, 9600, 19200, 38400, 57600,
+  74880, 115200, 230400, 250000, 500000, 1000000, 2000000
+];
 
 const log = document.getElementById('log');
 const butConnect = document.getElementById('butConnect');
@@ -79,10 +75,6 @@ function fitToContainer(canvas) {
   canvas.height = canvas.offsetHeight;
 }
 
-// ===============================
-// PAGE STARTUP
-// ===============================
-
 document.addEventListener('DOMContentLoaded', async () => {
   butConnect.addEventListener('click', clickConnect);
   butClear.addEventListener('click', clickClear);
@@ -92,6 +84,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   angleType.addEventListener('change', changeAngleType);
   darkMode.addEventListener('click', clickDarkMode);
 
+  // Add synced CSV/video recording buttons automatically.
   addRecordingButtons();
 
   if ('serial' in navigator) {
@@ -111,10 +104,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   await render();
 });
 
-// ===============================
-// BUTTON CREATION
-// ===============================
-
+/**
+ * Adds synced recording, CSV download, and clear buttons to the top controls.
+ *
+ * Start Synced Recording starts BOTH:
+ *   1. CSV data collection
+ *   2. video recording of the 3D canvas
+ *
+ * This is what makes the video and CSV match.
+ */
 function addRecordingButtons() {
   const startSyncedButton = document.createElement('button');
   startSyncedButton.id = 'startSyncedRecording';
@@ -147,18 +145,16 @@ function addRecordingButtons() {
   downloadButton.insertAdjacentElement('afterend', clearRecordedButton);
 }
 
-// ===============================
-// SERIAL CONNECTION
-// ===============================
-
+/**
+ * Opens a Web Serial connection and sets up the input stream.
+ */
 async function connect() {
   port = await navigator.serial.requestPort();
+
   await port.open({ baudRate: Number(baudRate.value) });
 
   let decoder = new TextDecoderStream();
-
   inputDone = port.readable.pipeTo(decoder.writable);
-
   inputStream = decoder.readable
     .pipeThrough(new TransformStream(new LineBreakTransformer()));
 
@@ -171,6 +167,9 @@ async function connect() {
   });
 }
 
+/**
+ * Closes the Web Serial connection.
+ */
 async function disconnect() {
   if (videoRecording) {
     stopSyncedRecording();
@@ -195,10 +194,9 @@ async function disconnect() {
   showCalibration = false;
 }
 
-// ===============================
-// SERIAL READING LOOP
-// ===============================
-
+/**
+ * Reads data from the input stream, parses it, and records it.
+ */
 async function readLoop() {
   while (true) {
     const {value, done} = await reader.read();
@@ -215,10 +213,14 @@ async function readLoop() {
   }
 }
 
-// ===============================
-// PARSE SERIAL DATA
-// ===============================
-
+/**
+ * Parses serial data lines.
+ *
+ * Expected input examples:
+ * Orientation: 357.19, 0.94, 1.62
+ * Quaternion: 0.9996, -0.0146, -0.0079, -0.0249
+ * Calibration: 0, 3, 3, 0
+ */
 function parseSerialLine(value) {
   value = value.trim();
 
@@ -231,7 +233,8 @@ function parseSerialLine(value) {
     quaternion = value.substr(11).trim().split(",").map(x => +x);
     latestQuaternion = quaternion;
 
-    // This records only during synced recording.
+    // Record one row every time a quaternion line arrives,
+    // but only while synced recording is active.
     recordCurrentReading();
   }
 
@@ -247,7 +250,7 @@ function parseSerialLine(value) {
 }
 
 // ===============================
-// SYNCED RECORDING
+// SYNCED CSV + VIDEO RECORDING
 // ===============================
 
 function startSyncedRecording() {
@@ -261,13 +264,13 @@ function startSyncedRecording() {
     return;
   }
 
-  // Clear old trial data so the CSV and video belong to the same trial.
+  // Clear previous trial data so this CSV and video match one another.
   recordedData = [];
   recordedVideoChunks = [];
 
   recordingId = makeRecordingId();
 
-  const stream = canvas.captureStream(30);
+  const stream = canvas.captureStream(30); // 30 frames per second
 
   try {
     mediaRecorder = new MediaRecorder(stream, {
@@ -289,11 +292,11 @@ function startSyncedRecording() {
     downloadVideo();
   };
 
-  // This is the shared start time for BOTH the video and CSV.
+  // Shared start time for BOTH the CSV rows and the video.
   recordingStartTimeMs = performance.now();
   recordingStopTimeMs = null;
 
-  // Start video.
+  // Start video recording.
   mediaRecorder.start();
 
   // Start CSV recording.
@@ -301,7 +304,6 @@ function startSyncedRecording() {
   videoRecording = true;
 
   setRecordingButtons(true);
-
   console.log("Synced recording started:", recordingId);
 }
 
@@ -311,18 +313,17 @@ function stopSyncedRecording() {
     return;
   }
 
-  // Stop CSV recording first so no extra rows are added after video stop.
+  // Stop CSV first so no extra rows are saved after the video ends.
   recordingEnabled = false;
   recordingStopTimeMs = performance.now();
 
-  // Stop video recording.
+  // Stop video. When it stops, downloadVideo() runs automatically.
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
   }
 
   videoRecording = false;
   setRecordingButtons(false);
-
   console.log("Synced recording stopped:", recordingId);
 }
 
@@ -351,10 +352,16 @@ function makeRecordingId() {
     String(now.getSeconds()).padStart(2, "0");
 }
 
-// ===============================
-// CSV RECORDING
-// ===============================
-
+/**
+ * Saves the latest complete reading into recordedData.
+ *
+ * Important columns:
+ *   elapsedMs: milliseconds since Start Synced Recording was clicked
+ *   videoTimeSec: seconds into the video
+ *
+ * A row with videoTimeSec = 2.50 matches about 2.50 seconds
+ * into the downloaded .webm video.
+ */
 function recordCurrentReading() {
   if (!recordingEnabled || recordingStartTimeMs === null) {
     return;
@@ -364,7 +371,7 @@ function recordCurrentReading() {
   const elapsedMs = nowMs - recordingStartTimeMs;
   const videoTimeSec = elapsedMs / 1000.0;
 
-  // These are the exact quaternion values used by Three.js to rotate the head.
+  // These are the exact quaternion values being applied to the 3D headContainer.
   const threeQx = latestQuaternion[1];
   const threeQy = latestQuaternion[3];
   const threeQz = -latestQuaternion[2];
@@ -372,11 +379,8 @@ function recordCurrentReading() {
 
   recordedData.push({
     recordingId: recordingId,
-
-    // Browser wall-clock timestamp.
     timestamp: new Date().toISOString(),
 
-    // These two columns are what let you match CSV rows to the video.
     elapsedMs: elapsedMs.toFixed(3),
     videoTimeSec: videoTimeSec.toFixed(6),
 
@@ -389,7 +393,6 @@ function recordCurrentReading() {
     qy: latestQuaternion[2],
     qz: latestQuaternion[3],
 
-    // Exact quaternion applied to the 3D head in Three.js.
     three_qx: threeQx,
     three_qy: threeQy,
     three_qz: threeQz,
@@ -402,6 +405,9 @@ function recordCurrentReading() {
   });
 }
 
+/**
+ * Downloads the synced IMU data as a CSV file.
+ */
 function downloadCSV() {
   if (recordedData.length === 0) {
     alert("No synced data recorded yet. Click Start Synced Recording, move the IMU, then Stop Synced Recording.");
@@ -457,10 +463,8 @@ function downloadCSV() {
 
   const a = document.createElement("a");
   a.href = url;
+  a.download = recordingId ? recordingId + "_imu_data.csv" : "imu_data.csv";
 
-  const filename = recordingId ? recordingId + "_imu_data.csv" : "imu_data.csv";
-
-  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -468,6 +472,35 @@ function downloadCSV() {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Downloads the synced 3D head movement video.
+ */
+function downloadVideo() {
+  if (recordedVideoChunks.length === 0) {
+    alert("No video data was recorded.");
+    return;
+  }
+
+  const blob = new Blob(recordedVideoChunks, {
+    type: 'video/webm'
+  });
+
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = recordingId ? recordingId + "_head_movement.webm" : "head_movement.webm";
+
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Clears the recorded CSV data and video chunks.
+ */
 function clearRecordedData() {
   if (videoRecording) {
     alert("Stop the synced recording before clearing data.");
@@ -483,45 +516,15 @@ function clearRecordedData() {
   alert("Recorded IMU data and video chunks cleared.");
 }
 
-// ===============================
-// VIDEO DOWNLOAD
-// ===============================
-
-function downloadVideo() {
-  if (recordedVideoChunks.length === 0) {
-    alert("No video data was recorded.");
-    return;
-  }
-
-  const blob = new Blob(recordedVideoChunks, {
-    type: 'video/webm'
-  });
-
-  const url = URL.createObjectURL(blob);
-
-  const a = document.createElement('a');
-  a.href = url;
-
-  const filename = recordingId ? recordingId + "_head_movement.webm" : "head_movement.webm";
-
-  a.download = filename;
-
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-
-  URL.revokeObjectURL(url);
-}
-
-// ===============================
-// SERIAL LOG
-// ===============================
-
 function logData(line) {
   if (showTimestamp.checked) {
     let d = new Date();
-    let timestamp = d.getHours() + ":" + `${d.getMinutes()}`.padStart(2, 0) + ":" +
-        `${d.getSeconds()}`.padStart(2, 0) + "." + `${d.getMilliseconds()}`.padStart(3, 0);
+    let timestamp =
+      d.getHours() + ":" +
+      `${d.getMinutes()}`.padStart(2, 0) + ":" +
+      `${d.getSeconds()}`.padStart(2, 0) + "." +
+      `${d.getMilliseconds()}`.padStart(3, 0);
+
     log.innerHTML += '<span class="timestamp">' + timestamp + ' -> </span>';
     d = null;
   }
@@ -538,10 +541,9 @@ function logData(line) {
   }
 }
 
-// ===============================
-// THEME
-// ===============================
-
+/**
+ * Sets the theme.
+ */
 function updateTheme() {
   document
     .querySelectorAll('link[rel=stylesheet].alternate')
@@ -566,10 +568,9 @@ function enableStyleSheet(node, enabled) {
   node.disabled = !enabled;
 }
 
-// ===============================
-// BUTTON HANDLERS
-// ===============================
-
+/**
+ * Reset the Log.
+ */
 async function reset() {
   log.innerHTML = "";
 }
@@ -582,9 +583,7 @@ async function clickConnect() {
   }
 
   await connect();
-
   reset();
-
   toggleUIConnected(true);
 }
 
@@ -613,10 +612,6 @@ async function clickClear() {
   reset();
 }
 
-// ===============================
-// UTILITY FUNCTIONS
-// ===============================
-
 async function finishDrawing() {
   return new Promise(requestAnimationFrame);
 }
@@ -625,6 +620,9 @@ async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * TransformStream to parse the stream into lines.
+ */
 class LineBreakTransformer {
   constructor() {
     this.container = '';
@@ -696,8 +694,11 @@ function loadSetting(setting, defaultValue) {
 
 let isWebGLAvailable = function() {
   try {
-    var testCanvas = document.createElement('canvas');
-    return !!(window.WebGLRenderingContext && (testCanvas.getContext('webgl') || testCanvas.getContext('experimental-webgl')));
+    var canvas = document.createElement('canvas');
+    return !!(
+      window.WebGLRenderingContext &&
+      (canvas.getContext('webgl') || canvas.getContext('experimental-webgl'))
+    );
   } catch (e) {
     return false;
   }
@@ -712,7 +713,10 @@ function updateCalibration() {
   ];
 
   const calLabels = [
-    "System", "Gyro", "Accelerometer", "Magnetometer"
+    "System",
+    "Gyro",
+    "Accelerometer",
+    "Magnetometer"
   ];
 
   calContainer.innerHTML = "";
@@ -741,16 +745,30 @@ function saveSetting(setting, value) {
 
 let head;
 
+// Parent container.
+// The head model and vestibular canal rings are placed inside this group.
+// This way, IMU rotation moves everything together.
+const headContainer = new THREE.Group();
+
 const renderer = new THREE.WebGLRenderer({
   canvas,
   preserveDrawingBuffer: true
 });
 
-const camera = new THREE.PerspectiveCamera(45, canvas.width / canvas.height, 0.1, 100);
+const camera = new THREE.PerspectiveCamera(
+  45,
+  canvas.width / canvas.height,
+  0.1,
+  100
+);
+
 camera.position.set(0, 0, 30);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('black');
+
+// Add the parent container to the scene.
+scene.add(headContainer);
 
 {
   const skyColor = 0xB1E1FF;
@@ -770,23 +788,88 @@ scene.background = new THREE.Color('black');
   scene.add(light.target);
 }
 
+// Helper function to create custom 3D torus canals.
+function createCanalRing(color) {
+  const geometry = new THREE.TorusGeometry(2.2, 0.18, 8, 32);
+
+  const material = new THREE.MeshPhongMaterial({
+    color: color,
+    transparent: true,
+    opacity: 0.7,
+    shininess: 80
+  });
+
+  return new THREE.Mesh(geometry, material);
+}
+
+// Generate structural sub-groups for left and right vestibular apparatuses.
+const leftEarGroup = new THREE.Group();
+const rightEarGroup = new THREE.Group();
+
+// Offset groups laterally.
+// Adjust these if the canal rings are not located correctly on your head model.
+leftEarGroup.position.set(7, 7.5, 0);
+rightEarGroup.position.set(-7, 7.5, 0);
+
+// ===============================
+// LEFT VESTIBULAR APPARATUS
+// ===============================
+
+// Horizontal canal: 30-degree pitch backwards.
+const leftHorizontal = createCanalRing(0x00ff00); // green
+leftHorizontal.rotation.x = THREE.MathUtils.degToRad(30);
+leftEarGroup.add(leftHorizontal);
+
+// Anterior canal.
+const leftAnterior = createCanalRing(0xff0000); // red
+leftAnterior.rotation.y = THREE.MathUtils.degToRad(45);
+leftEarGroup.add(leftAnterior);
+
+// Posterior canal.
+const leftPosterior = createCanalRing(0x0000ff); // blue
+leftPosterior.rotation.y = THREE.MathUtils.degToRad(-45);
+leftEarGroup.add(leftPosterior);
+
+// ===============================
+// RIGHT VESTIBULAR APPARATUS
+// ===============================
+
+const rightHorizontal = createCanalRing(0x00ff00); // green
+rightHorizontal.rotation.x = THREE.MathUtils.degToRad(30);
+rightEarGroup.add(rightHorizontal);
+
+const rightAnterior = createCanalRing(0xff0000); // red
+rightAnterior.rotation.y = THREE.MathUtils.degToRad(-45);
+rightEarGroup.add(rightAnterior);
+
+const rightPosterior = createCanalRing(0x0000ff); // blue
+rightPosterior.rotation.y = THREE.MathUtils.degToRad(45);
+rightEarGroup.add(rightPosterior);
+
+// Add ear/canal groups to the master head container.
+headContainer.add(leftEarGroup);
+headContainer.add(rightEarGroup);
+
+// Load the 3D head model.
 {
   const objLoader = new OBJLoader();
 
   objLoader.load('assets/head.obj', (root) => {
     head = root;
 
+    // Adjust if the head appears too large or too small.
     head.scale.set(1, 1, 1);
 
-    scene.add(root);
+    // Add the head to the same container as the canals.
+    headContainer.add(root);
   });
 }
 
 function resizeRendererToDisplaySize(renderer) {
-  const rendererCanvas = renderer.domElement;
-  const width = rendererCanvas.clientWidth;
-  const height = rendererCanvas.clientHeight;
-  const needResize = rendererCanvas.width !== width || rendererCanvas.height !== height;
+  const canvas = renderer.domElement;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  const needResize = canvas.width !== width || canvas.height !== height;
 
   if (needResize) {
     renderer.setSize(width, height, false);
@@ -798,44 +881,46 @@ function resizeRendererToDisplaySize(renderer) {
 // ===============================
 // RENDER LOOP
 // ===============================
+// This keeps redrawing the 3D head and applying the latest IMU rotation.
+// The rotation is applied to headContainer so the head and canal rings move together.
 
 async function render() {
   if (resizeRendererToDisplaySize(renderer)) {
-    const rendererCanvas = renderer.domElement;
-    camera.aspect = rendererCanvas.clientWidth / rendererCanvas.clientHeight;
+    const canvas = renderer.domElement;
+    camera.aspect = canvas.clientWidth / canvas.clientHeight;
     camera.updateProjectionMatrix();
   }
 
-  if (head != undefined) {
+  if (headContainer != undefined) {
     if (angleType.value == "euler") {
       if (showCalibration) {
-        let rotationEuler = new THREE.Euler(
+        const rotationEuler = new THREE.Euler(
           THREE.MathUtils.degToRad(360 - orientation[2]),
           THREE.MathUtils.degToRad(orientation[0]),
           THREE.MathUtils.degToRad(orientation[1]),
           'YZX'
         );
 
-        head.setRotationFromEuler(rotationEuler);
+        headContainer.setRotationFromEuler(rotationEuler);
       } else {
-        let rotationEuler = new THREE.Euler(
+        const rotationEuler = new THREE.Euler(
           THREE.MathUtils.degToRad(orientation[2]),
           THREE.MathUtils.degToRad(orientation[0] - 180),
           THREE.MathUtils.degToRad(-orientation[1]),
           'YZX'
         );
 
-        head.setRotationFromEuler(rotationEuler);
+        headContainer.setRotationFromEuler(rotationEuler);
       }
     } else {
-      let rotationQuaternion = new THREE.Quaternion(
+      const rotationQuaternion = new THREE.Quaternion(
         quaternion[1],
         quaternion[3],
         -quaternion[2],
         quaternion[0]
       );
 
-      head.setRotationFromQuaternion(rotationQuaternion);
+      headContainer.setRotationFromQuaternion(rotationQuaternion);
     }
   }
 
