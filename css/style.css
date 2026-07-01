@@ -118,7 +118,7 @@ button {
 }
 
 .log {
-  height: calc(50vh - 120px);
+  height: calc(32vh - 120px);
   width: 100vw;
   font-family:Consolas,Monaco,Lucida Console,Liberation Mono,DejaVu Sans Mono,Bitstream Vera Sans Mono,Courier New, monospace;
   font-size: 0.8em;
@@ -137,7 +137,7 @@ button {
   display: none;
   position: relative;
   width: calc(30vw - 10px);
-  height: calc(50vh - 120px);
+  height: calc(32vh - 120px);
   margin-left: 10px;
   border-width: 1px;
   border-style: solid;
